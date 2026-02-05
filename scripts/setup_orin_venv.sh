@@ -47,6 +47,15 @@ python -m pip install --no-cache-dir \
 # NumPy 2.x is incompatible with this torch build
 python -m pip install --no-cache-dir "numpy<2"
 
+# Runtime deps for quantization (`scripts/quantize.py`)
+python -m pip install --no-cache-dir \
+  "compressed-tensors==0.10.2" \
+  datasets==4.4.1 \
+  llmcompressor==0.3.0 \
+  pydantic==2.12.4 \
+  qwen-vl-utils==0.0.14 \
+  tyro==0.9.35
+
 # Build torchvision from source against Jetson torch (disable build isolation to avoid linking against a different torch)
 python -m pip uninstall -y torchvision || true
 python -m pip install --no-cache-dir --no-deps --no-build-isolation "git+https://github.com/pytorch/vision.git@v0.20.1"

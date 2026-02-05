@@ -1,17 +1,17 @@
 # CURRENT_TASK
 
-Active task: `devdocs/tasks/orin-cosmos-reason2-2b-perf/`
+Active task: `devdocs/tasks/orin-quantize-env/`
 
 ## Context
-- Measure inference performance of cosmos-reason2-2B on Jetson AGX Orin
-- Use scripts/inference_sample.py as the benchmark entrypoint (add args + JSONL output)
-- Capture cold/steady latency, throughput, and system utilization (tegrastats)
-- Run >=2 context/input-size configurations and summarize results
+- Port the uv-managed environment to Jetson AGX Orin (aarch64, Python 3.10)
+- Align torch/torchvision/numpy constraints with `ORIN_VENV_SETUP.md`
+- Ensure `scripts/quantize.py` dependencies resolve and the script can run on Orin
+- Ensure the quantized model works with `scripts/inference_sample.py` (no tokenizer-regex warning)
 
 ## Task Files
-- Plan: `devdocs/tasks/orin-cosmos-reason2-2b-perf/task_plan.md`
-- Worklog: `devdocs/tasks/orin-cosmos-reason2-2b-perf/worklog.md`
-- Deliverable: `devdocs/tasks/orin-cosmos-reason2-2b-perf/deliverable.md`
+- Plan: `devdocs/tasks/orin-quantize-env/task_plan.md`
+- Worklog: `devdocs/tasks/orin-quantize-env/worklog.md`
+- Deliverable: `devdocs/tasks/orin-quantize-env/deliverable.md`
 
 ## History Search
 - `rg -n "<keywords>" devdocs/tasks docs/tasks -S`

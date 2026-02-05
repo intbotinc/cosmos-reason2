@@ -7,6 +7,8 @@ This document summarizes the exact steps and fixes used to get `scripts/inferenc
 Changes visible in git:
 - Modified: `scripts/inference_sample.py`
 - Modified: `scripts/setup_orin_venv.sh`
+- Modified: `scripts/quantize.py`
+- Modified: `scripts/quantize.py.lock`
 
 Note: There was also a necessary patch to a **venv-installed** file:
 - Patched: `.venv/lib/python3.10/site-packages/torchvision/_meta_registrations.py`
@@ -71,6 +73,21 @@ The Jetson torch wheel is not compatible with NumPy 2.x:
 source .venv/bin/activate
 python -m pip install --no-cache-dir "numpy<2"
 ```
+
+### 5b) (Optional) Install quantization deps (`scripts/quantize.py`)
+```bash
+source .venv/bin/activate
+python -m pip install --no-cache-dir \
+  "compressed-tensors==0.10.2" \
+  datasets==4.4.1 \
+  llmcompressor==0.3.0 \
+  pydantic==2.12.4 \
+  qwen-vl-utils==0.0.14 \
+  tyro==0.9.35
+```
+
+Notes:
+- `llmcompressor==0.3.0` is compatible with `compressed-tensors==0.10.2` on Orin; newer `compressed-tensors` releases can break imports (e.g., missing `safe_permute`).
 
 ### 6) Build torchvision from source (compatible with Jetson torch)
 Binary wheels of torchvision try to pull a different PyTorch build and also fail at runtime. Build from source against the installed Jetson torch:

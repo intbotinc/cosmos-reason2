@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env -S UV_SKIP_WHEEL_FILENAME_CHECK=1 uv run --script --no-build-isolation-package torchvision
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -18,20 +18,32 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "llmcompressor @ git+https://github.com/vllm-project/llm-compressor.git@6e459ed",
-#   "pillow>=2.2.1",
-#   "pydantic>=2.12.4",
+#   # Core deps
+#   "compressed-tensors==0.10.2; platform_machine == 'aarch64'",
+#   "datasets==4.4.1",
+#   "llmcompressor==0.3.0; platform_machine == 'aarch64'",
+#   "llmcompressor @ git+https://github.com/vllm-project/llm-compressor.git@6e459ed; platform_machine != 'aarch64'",
+#   "pillow==12.0.0",
+#   "pydantic==2.12.4",
 #   "qwen-vl-utils==0.0.14",
-#   "torch==2.8.0",
-#   "torchcodec>=0.8.1",
-#   "torchvision",
 #   "tyro>=0.9.35",
-#   "transformers @ git+https://github.com/huggingface/transformers.git@def9a7ef057b13d04aeeaa150e3ce63afa151d4e",
+#   "transformers==4.57.3",
+#
+#   # Jetson AGX Orin (aarch64, JetPack 6.x): use NVIDIA's torch wheel + NumPy 1.x
+#   "numpy<2; platform_machine == 'aarch64'",
+#   "nvidia-cusparselt-cu12; platform_machine == 'aarch64'",
+#   "torch @ https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0%2B872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl; platform_machine == 'aarch64'",
+#   "torchvision @ git+https://github.com/pytorch/vision.git@v0.20.1; platform_machine == 'aarch64'",
+#
+#   # x86_64 CUDA (keep existing flow)
+#   "torch==2.8.0; platform_machine != 'aarch64'",
+#   "torchvision; platform_machine != 'aarch64'",
+#   "torchcodec>=0.8.1; platform_machine != 'aarch64'",
 # ]
 #
 # [tool.uv.sources]
-# torch = [{ index = "pytorch-cu128"}]
-# torchvision = [{ index = "pytorch-cu128"}]
+# torch = [{ index = "pytorch-cu128", marker = "platform_machine != 'aarch64'" }]
+# torchvision = [{ index = "pytorch-cu128", marker = "platform_machine != 'aarch64'" }]
 #
 # [[tool.uv.index]]
 # name = "pytorch-cu128"
@@ -52,9 +64,147 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
+from pathlib import Path
+import platform
 from typing import Annotated, Literal
 
 _MINIMUM_HF_CLI_VERSION = "1.3.5"
+_CUSPARSELT_REEXEC_ENV = "_COSMOS_REASON2_CUSPARSELT_REEXEC"
+
+
+def _maybe_reexec_with_cusparselt_in_ld_library_path() -> None:
+    """Torch on Jetson may require cuSPARSELt in LD_LIBRARY_PATH (needs restart)."""
+
+    if os.environ.get(_CUSPARSELT_REEXEC_ENV) == "1":
+        return
+
+    prefix = Path(sys.prefix)
+    lib_dir = (
+        prefix
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+        / "nvidia"
+        / "cusparselt"
+        / "lib"
+    )
+    if not (lib_dir / "libcusparseLt.so.0").exists():
+        return
+
+    ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_paths = [p for p in ld_library_path.split(":") if p]
+    if str(lib_dir) in ld_paths:
+        return
+
+    new_env = dict(os.environ)
+    new_env["LD_LIBRARY_PATH"] = f"{lib_dir}:{ld_library_path}" if ld_library_path else str(lib_dir)
+    new_env[_CUSPARSELT_REEXEC_ENV] = "1"
+    os.execve(sys.executable, [sys.executable, *sys.argv], new_env)
+
+
+def _maybe_patch_torchvision_meta_registrations() -> None:
+    """Patch torchvision's nms meta registration to avoid missing-op crashes on Jetson.
+
+    On some Jetson builds, torchvision ops may be unavailable, and importing torchvision can fail with:
+    `RuntimeError: operator torchvision::nms does not exist`.
+    """
+
+    if platform.machine() != "aarch64":
+        return
+
+    tv_meta_file = (
+        Path(sys.prefix)
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+        / "torchvision"
+        / "_meta_registrations.py"
+    )
+    if not tv_meta_file.is_file():
+        return
+
+    lines = tv_meta_file.read_text().splitlines()
+    needle = '@torch.library.register_fake("torchvision::nms")'
+    try:
+        dec_idx = next(i for i, line in enumerate(lines) if needle in line)
+    except StopIteration:
+        return
+
+    start_idx = dec_idx
+    if dec_idx > 0 and lines[dec_idx - 1].strip() == "if torchvision.extension._has_ops():":
+        start_idx = dec_idx - 1
+
+    try:
+        end_idx = next(i for i in range(dec_idx + 1, len(lines)) if lines[i].startswith("@register_meta("))
+    except StopIteration:
+        return
+
+    patched_block = [
+        "if torchvision.extension._has_ops():",
+        '    @torch.library.register_fake("torchvision::nms")',
+        "    def meta_nms(dets, scores, iou_threshold):",
+        '        torch._check(dets.dim() == 2, lambda: f"boxes should be a 2d tensor, got {dets.dim()}D")',
+        "        torch._check(",
+        '            dets.size(1) == 4, lambda: f"boxes should have 4 elements in dimension 1, got {dets.size(1)}"',
+        "        )",
+        '        torch._check(scores.dim() == 1, lambda: f"scores should be a 1d tensor, got {scores.dim()}")',
+        "        torch._check(",
+        "            dets.size(0) == scores.size(0),",
+        '            lambda: f"boxes and scores should have same number of elements in dimension 0, got {dets.size(0)} and {scores.size(0)}",',
+        "        )",
+        "        ctx = torch._custom_ops.get_ctx()",
+        "        num_to_keep = ctx.create_unbacked_symint()",
+        "        return dets.new_empty(num_to_keep, dtype=torch.long)",
+        "else:",
+        "    def meta_nms(dets, scores, iou_threshold):",
+        "        return None",
+        "",
+    ]
+
+    new_lines = lines[:start_idx] + patched_block + lines[end_idx:]
+    tv_meta_file.write_text("\n".join(new_lines) + "\n")
+
+
+def _maybe_patch_compressed_tensors_kv_cache_scale_type() -> None:
+    """Backfill KVCacheScaleType for compressed-tensors versions that removed it.
+
+    `llmcompressor==0.3.0` imports `KVCacheScaleType` from
+    `compressed_tensors.quantization.lifecycle`, but newer `compressed-tensors`
+    versions may not export it.
+    """
+
+    try:
+        from compressed_tensors.quantization import lifecycle as ct_lifecycle  # type: ignore
+    except Exception:
+        return
+
+    if hasattr(ct_lifecycle, "KVCacheScaleType"):
+        return
+
+    try:
+        from enum import Enum
+
+        class KVCacheScaleType(str, Enum):
+            KEY = "key"
+            VALUE = "value"
+
+        ct_lifecycle.KVCacheScaleType = KVCacheScaleType  # type: ignore[attr-defined]
+    except Exception:
+        return
+
+
+def _sdpa_supports_enable_gqa(torch) -> bool:
+    try:
+        q = torch.empty((1, 1, 1, 1))
+        torch.nn.functional.scaled_dot_product_attention(q, q, q, enable_gqa=True)
+        return True
+    except TypeError as exc:
+        if "enable_gqa" in str(exc):
+            return False
+        return False
+    except Exception:
+        return True
 
 
 def init():
@@ -69,24 +219,47 @@ def init():
 
 
 init()
+_maybe_reexec_with_cusparselt_in_ld_library_path()
+_maybe_patch_torchvision_meta_registrations()
+_maybe_patch_compressed_tensors_kv_cache_scale_type()
 print("Loading dependencies...")
 
 
 import base64
 import json
 from io import BytesIO
-from pathlib import Path
 
 import pydantic
 import requests
 import torch
 import tyro
 from datasets import load_dataset
-from llmcompressor import oneshot
-from llmcompressor.modeling.moe_context import moe_calibration_context
+
+# llmcompressor API compatibility:
+# - Newer versions (used on x86_64) provide `oneshot` + `moe_calibration_context`.
+# - Jetson Orin uses `llmcompressor==0.3.0`, which provides `apply()` + `Recipe`.
+try:  # pragma: no cover
+    from llmcompressor import oneshot as llmcompressor_oneshot
+except Exception:  # pragma: no cover
+    llmcompressor_oneshot = None
+    from llmcompressor import apply as llmcompressor_apply
+
+try:  # pragma: no cover
+    from llmcompressor.modeling.moe_context import moe_calibration_context
+except Exception:  # pragma: no cover
+    from contextlib import contextmanager
+
+    @contextmanager
+    def moe_calibration_context(_model):
+        yield
+
 from llmcompressor.modifiers.quantization import QuantizationModifier
 from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
-from llmcompressor.utils import dispatch_for_generation
+try:  # pragma: no cover
+    from llmcompressor.utils import dispatch_for_generation
+except Exception:  # pragma: no cover
+    def dispatch_for_generation(_model):
+        return None
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
@@ -207,6 +380,7 @@ def run_sample_generation(
     model: Qwen3VLForConditionalGeneration,
     processor: AutoProcessor,
     max_sequence_length: int,
+    device: str,
 ):
     print("========== SAMPLE GENERATION ==============")
     dispatch_for_generation(model)
@@ -231,7 +405,7 @@ def run_sample_generation(
         max_length=max_sequence_length,
         truncation=True,
         return_tensors="pt",
-    ).to("cuda")
+    ).to(device)
 
     print("Generating response...")
     output = model.generate(**inputs, max_new_tokens=100, temperature=0.7)
@@ -266,6 +440,30 @@ def postprocess_config(config_path: Path):
         json.dump(clean_config, f, indent=2)
 
 
+def _recipe_yaml_from_modifiers(modifiers: list) -> str:
+    """Create a llmcompressor recipe YAML string from modifier objects.
+
+    `llmcompressor==0.3.0` has a bug when creating recipes from modifiers: it uses
+    `yaml.dump`, which serializes tuples as `!!python/tuple`, but then parses with
+    `yaml.safe_load`, which rejects those tags. We use `yaml.safe_dump` to generate
+    a safe, portable recipe string.
+    """
+
+    import yaml
+
+    return yaml.safe_dump(
+        {
+            "DEFAULT_stage": {
+                "DEFAULT_modifiers": {
+                    modifier.__class__.__name__: modifier.model_dump(exclude_unset=True)
+                    for modifier in modifiers
+                }
+            }
+        },
+        sort_keys=False,
+    )
+
+
 def quantize(args: Args):
     print("Pre-downloading dataset: lmms-lab/flickr30k")
     _hf_download(["lmms-lab/flickr30k", "--repo-type", "dataset"])
@@ -277,9 +475,18 @@ def quantize(args: Args):
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        args.model, torch_dtype="auto"
+    attn_implementation = (
+        "sdpa" if _sdpa_supports_enable_gqa(torch) else "eager"
     )
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        args.model,
+        torch_dtype="auto",
+        attn_implementation=attn_implementation,
+    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading model to device: {device}")
+    model = model.to(device)
+    model.eval()
     processor = AutoProcessor.from_pretrained(args.model)
     dataset_id = "lmms-lab/flickr30k"
     dataset_split = {"calibration": f"test[:{args.num_samples}]"}
@@ -300,24 +507,46 @@ def quantize(args: Args):
         batched=False,
         remove_columns=ds["calibration"].column_names,
     )
-    recipe = get_quantization_recipe(
+    recipe_modifiers = get_quantization_recipe(
         args.precision, args.kv_precision, args.smoothing_strength
     )
 
     print(f"Starting {args.precision} quantization process...")
+    def device_data_collator(batch: list[dict]) -> dict:
+        assert len(batch) == 1
+        return {
+            key: torch.tensor(value, device=device) for key, value in batch[0].items()
+        }
+
     with moe_calibration_context(model):
-        oneshot(
-            model=model,
-            recipe=recipe,
-            max_seq_length=args.max_sequence_length,
-            num_calibration_samples=args.num_samples,
-            dataset=ds,
-            data_collator=data_collator,
-            sequential_targets=sequential_targets,
-        )
+        if llmcompressor_oneshot is not None:
+            llmcompressor_oneshot(
+                model=model,
+                recipe=recipe_modifiers,
+                max_seq_length=args.max_sequence_length,
+                num_calibration_samples=args.num_samples,
+                dataset=ds,
+                data_collator=device_data_collator,
+                sequential_targets=sequential_targets,
+            )
+        else:
+            from torch.utils.data import DataLoader
+
+            calib_loader = DataLoader(
+                ds["calibration"],
+                batch_size=1,
+                shuffle=False,
+                collate_fn=device_data_collator,
+            )
+            llmcompressor_apply(
+                recipe=_recipe_yaml_from_modifiers(recipe_modifiers),
+                model=model,
+                calib_data=calib_loader,
+                copy_data=False,
+            )
     print("Quantization complete!")
     print("Running sample generation...")
-    run_sample_generation(model, processor, args.max_sequence_length)
+    run_sample_generation(model, processor, args.max_sequence_length, device=device)
     print(f"Saving quantized model to: {output_dir}...")
     save_model(model, processor, output_dir)
     config_path = output_dir / "config.json"

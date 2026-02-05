@@ -334,7 +334,15 @@ def main(argv: list[str] | None = None) -> int:
                 device_map="auto",
                 attn_implementation=attn_implementation,
             )
-            processor = transformers.Qwen3VLProcessor.from_pretrained(model_name)
+            try:
+                processor = transformers.Qwen3VLProcessor.from_pretrained(
+                    model_name,
+                    fix_mistral_regex=True,
+                )
+            except TypeError as exc:
+                if "fix_mistral_regex" not in str(exc):
+                    raise
+                processor = transformers.Qwen3VLProcessor.from_pretrained(model_name)
         except OSError as exc:
             msg = str(exc)
             if "gated repo" in msg or "Cannot access gated repo" in msg or "401" in msg:
