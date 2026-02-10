@@ -114,8 +114,8 @@ def main():
     print("set_seed done", f"{t1 - t0:.3f}s")
 
     # Load model
-    #model_name = "nvidia/Cosmos-Reason2-2B"
-    model_name = "/tmp/cosmos-reason2/checkpoints/model_nvfp4"
+    model_name = "nvidia/Cosmos-Reason2-2B"
+    #model_name = "/tmp/cosmos-reason2/checkpoints/model_nvfp4"
     if not torch.cuda.is_available():
         raise SystemExit("error: CUDA is not available; aborting")
 
@@ -141,7 +141,7 @@ def main():
 
     t = time.time()
     print("load processor")
-    processor = transformers.Qwen3VLProcessor.from_pretrained(model_name)
+    processor = transformers.Qwen3VLProcessor.from_pretrained(model_name, fix_mistral_regex=True,)
     t3 = time.time()
     print("load processor done", f"{t3 - t:.3f}s")
 
@@ -167,8 +167,10 @@ def main():
             "content": [
                 {
                     "type": "image",
-                    "image": f"{ROOT}/assets/sample.png",
+                    #"image": f"{ROOT}/assets/sample.png",
+                    "image": f"{ROOT}/assets/person.jpg",
                 },
+                #{"type": "text", "text": "What's the color of the clothes."},
                 {"type": "text", "text": "Describe this image in detail."},
             ],
         },
@@ -193,10 +195,18 @@ def main():
     t4 = time.time()
     print("preprocess done", f"{t4 - t:.3f}s")
 
-    t = time.time()
+    # Warm-up (not timed)
+    print("warm up")
+    with torch.no_grad():
+        _ = model.generate(**inputs, max_new_tokens=16)
+    print("warm up done")
+
+    torch.cuda.synchronize()
     print("generate")
+    t = time.time()
     # Run inference
     generated_ids = model.generate(**inputs, max_new_tokens=4096)
+    torch.cuda.synchronize()
     t5 = time.time()
     print("generate done", f"{t5 - t:.3f}s")
     output_tokens = generated_ids.shape[-1] - input_tokens

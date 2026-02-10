@@ -1,17 +1,15 @@
 # CURRENT_TASK
 
-Active task: `devdocs/tasks/orin-quantize-env/`
+Active task: `devdocs/tasks/tegrastats-fp4-vs-fp16/`
 
 ## Context
-- Port the uv-managed environment to Jetson AGX Orin (aarch64, Python 3.10)
-- Align torch/torchvision/numpy constraints with `ORIN_VENV_SETUP.md`
-- Ensure `scripts/quantize.py` dependencies resolve and the script can run on Orin
-- Ensure the quantized model works with `scripts/inference_sample.py` (no tokenizer-regex warning)
+- Analyze tegrastats logs for two model runs (FP4 vs FP16): tegra-fp4.log and tegra-fp16.log
+- Summarize GPU (GR3D), memory (RAM/SWAP), CPU, EMC, power, temps, and compare
 
 ## Task Files
-- Plan: `devdocs/tasks/orin-quantize-env/task_plan.md`
-- Worklog: `devdocs/tasks/orin-quantize-env/worklog.md`
-- Deliverable: `devdocs/tasks/orin-quantize-env/deliverable.md`
+- Plan: `devdocs/tasks/tegrastats-fp4-vs-fp16/task_plan.md`
+- Worklog: `devdocs/tasks/tegrastats-fp4-vs-fp16/worklog.md`
+- Deliverable: `devdocs/tasks/tegrastats-fp4-vs-fp16/deliverable.md`
 
 ## History Search
 - `rg -n "<keywords>" devdocs/tasks docs/tasks -S`
